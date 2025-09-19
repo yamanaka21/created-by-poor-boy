@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>日記アプリ — ブラウザ版</title>
+  <meta name="theme-color" content="#4f46e5" />
+  <style>
+    :root{--bg:#0f172a;--card:#0b1220;--accent:#4f46e5;--text:#e6eef8}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,Arial;background:linear-gradient(180deg,#071028 0%,#071433 100%);color:var(--text);min-height:100vh}
+    header{padding:14px 16px;display:flex;gap:12px;align-items:center}
+    h1{margin:0;font-size:18px}
+    .wrap{display:grid;grid-template-columns:1fr;gap:12px;padding:12px}
+    @media(min-width:800px){.wrap{grid-template-columns:360px 1fr;max-width:1100px;margin:12px auto}}
+    .card{background:rgba(255,255,255,0.03);padding:12px;border-radius:12px;box-shadow:0 6px 20px rgba(2,6,23,0.6)}
+    .calendar{display:grid;grid-template-rows:auto 1fr;gap:8px}
+    .month-head{display:flex;justify-content:space-between;align-items:center}
+    .grid-days{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+    .day{padding:8px;border-radius:8px;text-align:center;font-size:14px}
+    .day.empty{opacity:0.15}
+    .day.today{border:1px solid rgba(79,70,229,0.8)}
+    .day.selected{background:var(--accent);color:#fff}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    button{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px 10px;border-radius:8px;color:var(--text);font-size:14px}
+    #editor{min-height:320px;border-radius:10px;padding:12px;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));outline:none}
+    #editor:empty:before{content:"ここに日記を書いてください。入力すると自動保存されます...";opacity:0.5}
+    .images{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .images img{max-width:120px;border-radius:8px;object-fit:cover;max-height:120px}
+    .status{font-size:12px;opacity:0.8;margin-left:8px}
+    .small{font-size:13px}
+    .row{display:flex;gap:8px;align-items:center}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>日記アプリ（ブラウザ版）</h1>
+    <div class="status" id="saveStatus">読み込み中…</div>
+  </header>
+
+  <main class="wrap">
+    <section class="card">
+      <div class="calendar">
+        <div class="month-head">
+          <div><button id="prev">◀</button><button id="next">▶</button></div>
+          <div id="monthLabel" class="small"></div>
+          <div><button id="todayBtn">今日</button></div>
+        </div>
+        <div class="grid-days" id="calendarGrid"></div>
+      </div>
+      <div class="toolbar">
+        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+          <input id="imageInput" type="file" accept="image/*" multiple style="display:none" />画像を挿入
+        </label>
+        <button id="exportJson">エクスポート(JSON)</button>
+        <button id="importJson">インポート(JSON)</button>
+        <button id="deleteEntry">削除</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row"><strong id="selectedDateLabel"></strong><div class="status" id="autoSave">自動保存: --</div></div>
+      <div id="editor" contenteditable="true" aria-label="日記エディタ"></div>
+      <div class="images" id="images"></div>
+    </section>
+  </main>
+
+<script>
+// --- シンプルなIndexedDBラッパー ---
+const DB_NAME = 'diary-db-v1';
+const STORE_ENTRIES = 'entries';
+let db;
+function openDB(){
+  return new Promise((res, rej)=>{
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = e => {
+      const idb = e.target.result;
+      if(!idb.objectStoreNames.contains(STORE_ENTRIES)){
+        const store = idb.createObjectStore(STORE_ENTRIES, { keyPath: 'id' });
+        store.createIndex('byDate', 'date', { unique: true });
+      }
+    }
+    r.onsuccess = e => { db = e.target.result; res(db); }
+    r.onerror = e => rej(e.target.error)
+  })
+}
+function idbPut(storeName, val){
+  return new Promise((res,rej)=>{
+    const tx = db.transaction(storeName, 'readwrite');
+    const st = tx.objectStore(storeName);
+    const req = st.put(val);
+    req.onsuccess = ()=>res(req.result);
+    req.onerror = e=>rej(e.target.error);
+  })
+}
+function idbGet(storeName, key){
+  return new Promise((res,rej)=>{
+    const tx = db.transaction(storeName, 'readonly');
+    const st = tx.objectStore(storeName);
+    const req = st.get(key);
+    req.onsuccess = ()=>res(req.result);
+    req.onerror = e=>rej(e.target.error);
+  })
+}
+function idbGetAll(storeName){
+  return new Promise((res,rej)=>{
+    const tx = db.transaction(storeName, 'readonly');
+    const st = tx.objectStore(storeName);
+    const req = st.getAll();
+    req.onsuccess = ()=>res(req.result);
+    req.onerror = e=>rej(e.target.error);
+  })
+}
+function idbDelete(storeName, key){
+  return new Promise((res,rej)=>{
+    const tx = db.transaction(storeName, 'readwrite');
+    const st = tx.objectStore(storeName);
+    const req = st.delete(key);
+    req.onsuccess = ()=>res();
+    req.onerror = e=>rej(e.target.error);
+  })
+}
+
+// --- 日付ユーティリティ ---
+function ymd(date){
+  const y = date.getFullYear();
+  const m = (date.getMonth()+1).toString().padStart(2,'0');
+  const d = date.getDate().toString().padStart(2,'0');
+  return `${y}-${m}-${d}`;
+}
+
+// --- UI ---
+const calendarGrid = document.getElementById('calendarGrid');
+const monthLabel = document.getElementById('monthLabel');
+const selectedDateLabel = document.getElementById('selectedDateLabel');
+const editor = document.getElementById('editor');
+const imagesWrap = document.getElementById('images');
+const saveStatus = document.getElementById('saveStatus');
+const autoSave = document.getElementById('autoSave');
+let current = new Date();
+let selected = new Date();
+let autosaveTimer = null;
+let pendingSave = false;
+
+function renderCalendar(ref){
+  const year = ref.getFullYear(), month = ref.getMonth();
+  monthLabel.textContent = `${year} 年 ${month+1} 月`;
+  calendarGrid.innerHTML = '';
+  const first = new Date(year, month, 1);
+  const startDay = first.getDay();
+  const daysInMonth = new Date(year, month+1, 0).getDate();
+  // week headers
+  const headers = ['日','月','火','水','木','金','土'];
+  headers.forEach(h=>{const el=document.createElement('div');el.className='day small';el.textContent=h;calendarGrid.appendChild(el)});
+  // fill empties
+  for(let i=0;i<startDay;i++){const el=document.createElement('div');el.className='day empty';el.textContent='';calendarGrid.appendChild(el)}
+  for(let d=1; d<=daysInMonth; d++){
+    const el = document.createElement('button');
+    el.className='day';
+    el.textContent = d;
+    const dt = new Date(year, month, d);
+    const id = ymd(dt);
+    el.onclick = ()=>selectDate(dt);
+    if(ymd(dt)===ymd(new Date())) el.classList.add('today');
+    if(ymd(dt)===ymd(selected)) el.classList.add('selected');
+    calendarGrid.appendChild(el);
+  }
+}
+
+async function selectDate(dt){
+  selected = new Date(dt);
+  selectedDateLabel.textContent = `${selected.getFullYear()}-${(selected.getMonth()+1).toString().padStart(2,'0')}-${selected.getDate().toString().padStart(2,'0')}`;
+  await loadEntryFor(selected);
+  renderCalendar(new Date(current.getFullYear(), current.getMonth()));
+}
+
+// --- Entries handling ---
+async function loadEntryFor(dt){
+  const key = ymd(dt);
+  const rec = await idbGet(STORE_ENTRIES, key);
+  if(rec){
+    editor.innerHTML = rec.text || '';
+    imagesWrap.innerHTML = '';
+    if(rec.images && rec.images.length){
+      for(const blob of rec.images){
+        const url = URL.createObjectURL(blob);
+        const img = document.createElement('img'); img.src = url; imagesWrap.appendChild(img);
+      }
+    }
+    saveStatus.textContent = '読み込み完了';
+  } else {
+    editor.innerHTML = '';
+    imagesWrap.innerHTML = '';
+    saveStatus.textContent = '新規作成';
+  }
+}
+
+async function saveCurrent(){
+  const key = ymd(selected);
+  const rec = await idbGet(STORE_ENTRIES, key) || { id:key, date:key, text:'', images:[] };
+  rec.text = editor.innerHTML;
+  // images are already stored as blobs inside rec.images
+  await idbPut(STORE_ENTRIES, rec);
+  const t = new Date().toLocaleTimeString();
+  autoSave.textContent = `自動保存: ${t}`;
+  saveStatus.textContent = '保存済み';
+  pendingSave = false;
+}
+
+// autosave on input (debounced)
+editor.addEventListener('input', ()=>{
+  saveStatus.textContent = '編集中...';
+  pendingSave = true;
+  if(autosaveTimer) clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(()=>{ saveCurrent().catch(e=>console.error(e)) }, 800);
+});
+
+// image insert
+const imageInput = document.getElementById('imageInput');
+imageInput.addEventListener('change', async (e)=>{
+  const files = Array.from(e.target.files || []);
+  if(!files.length) return;
+  const key = ymd(selected);
+  const rec = await idbGet(STORE_ENTRIES, key) || { id:key, date:key, text:editor.innerHTML, images:[] };
+  for(const f of files){
+    const blob = await f.slice(0, f.size, f.type); // make blob copy
+    rec.images.push(blob);
+    const url = URL.createObjectURL(blob);
+    const img = document.createElement('img'); img.src = url; imagesWrap.appendChild(img);
+  }
+  await idbPut(STORE_ENTRIES, rec);
+  autoSave.textContent = `画像を保存しました (${new Date().toLocaleTimeString()})`;
+});
+
+// delete entry
+document.getElementById('deleteEntry').addEventListener('click', async ()=>{
+  if(!confirm('この日の日記を削除しますか？')) return;
+  const key = ymd(selected);
+  await idbDelete(STORE_ENTRIES, key);
+  editor.innerHTML = '';
+  imagesWrap.innerHTML = '';
+  saveStatus.textContent = '削除しました';
+});
+
+// export/import
+document.getElementById('exportJson').addEventListener('click', async ()=>{
+  const all = await idbGetAll(STORE_ENTRIES);
+  // images are blobs — convert to base64 to export
+  const out = [];
+  for(const r of all){
+    const obj = { id:r.id, date:r.date, text:r.text, images:[] };
+    for(const b of (r.images||[])){
+      obj.images.push(await blobToBase64(b));
+    }
+    out.push(obj);
+  }
+  const blob = new Blob([JSON.stringify(out)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'diary-export.json'; a.click();
+});
+
+async function blobToBase64(b){
+  return new Promise((res)=>{
+    const r = new FileReader(); r.onload = ()=>res(r.result); r.readAsDataURL(b);
+  })
+}
+
+document.getElementById('importJson').addEventListener('click', async ()=>{
+  const f = document.createElement('input'); f.type='file'; f.accept='application/json';
+  f.onchange = async ()=>{
+    const file = f.files[0];
+    if(!file) return;
+    const text = await file.text();
+    const arr = JSON.parse(text);
+    for(const item of arr){
+      const ents = { id:item.id, date:item.date, text:item.text, images:[] };
+      for(const dataUrl of (item.images||[])){
+        const b = dataURLToBlob(dataUrl);
+        ents.images.push(b);
+      }
+      await idbPut(STORE_ENTRIES, ents);
+    }
+    alert('インポート完了');
+    await loadEntryFor(selected);
+  }
+  f.click();
+});
+
+function dataURLToBlob(dataurl){
+  const arr = dataurl.split(','), mime = arr[0].match(/:(.*?);/)[1];
+  const bstr = atob(arr[1]); let n = bstr.length; const u8 = new Uint8Array(n);
+  while(n--) u8[n] = bstr.charCodeAt(n);
+  return new Blob([u8], {type:mime});
+}
+
+// navigation
+document.getElementById('prev').addEventListener('click', ()=>{ current.setMonth(current.getMonth()-1); renderCalendar(current); });
+document.getElementById('next').addEventListener('click', ()=>{ current.setMonth(current.getMonth()+1); renderCalendar(current); });
+document.getElementById('todayBtn').addEventListener('click', ()=>{ current = new Date(); selectDate(new Date()); renderCalendar(current); });
+
+// init
+(async ()=>{
+  await openDB();
+  await selectDate(new Date());
+  renderCalendar(new Date());
+  saveStatus.textContent = '準備完了';
+})();
+
+// --- PWA: service worker を動的に登録（ホスティング時のみ有効） ---
+if('serviceWorker' in navigator){
+  // inline SW source as a blob so the app can be a single file for preview.
+  const swSource = `self.addEventListener('install', e=>{self.skipWaiting();});
+  self.addEventListener('activate', e=>{e.waitUntil(self.clients.claim());});
+  self.addEventListener('fetch', e=>{ // basic offline: try network then cache fallback
+    e.respondWith(fetch(e.request).catch(()=>caches.match(e.request)));
+  });`;
+  try{
+    const blob = new Blob([swSource], {type:'application/javascript'});
+    const swUrl = URL.createObjectURL(blob);
+    navigator.serviceWorker.register(swUrl).then(()=>console.log('SW registered')).catch(e=>console.warn('SW registration failed (needs https or localhost):', e));
+  }catch(e){console.warn('service worker failed', e)}
+}
+
+// --- ユーザ向けヒント: 自動保存の注意 ---
+window.addEventListener('beforeunload', (e)=>{
+  if(pendingSave){ e.preventDefault(); e.returnValue='保存中の変更があります。ページを離れますか？'; }
+});
+
+</script>
+</body>
+</html>
